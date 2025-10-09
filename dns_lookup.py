@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import csv
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import sys
+from pprint import pprint
 
 def extract_ips_from_nslookup(output):
     """
@@ -16,12 +18,12 @@ def extract_ips_from_nslookup(output):
     for line in lines:
         line = line.strip()
 
-        # Once we hit a 'Name:' line, we know we're now in the answer section
+        # Detect start of answer section
         if line.startswith("Name:"):
             in_answer_section = True
             continue
 
-        # Capture 'Address:' lines *after* the answer section starts
+        # Capture IPs after 'Name:' appears
         if in_answer_section and line.startswith("Address:"):
             ip = line.split("Address:")[-1].strip()
             if ip:
@@ -37,7 +39,7 @@ def dns_lookup(fqdn, dns_server):
             ["nslookup", fqdn, dns_server],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True,  # Python 3.6-compatible text mode
+            universal_newlines=True,  # Python 3.6+ compatible
             timeout=5
         )
         output = result.stdout.strip() or result.stderr.strip()
@@ -48,36 +50,82 @@ def dns_lookup(fqdn, dns_server):
         return dns_server, {"fqdn": fqdn, "ips": [], "error": str(e)}
 
 
+def read_fqdns_from_csv(filename):
+    """
+    Read FQDNs and one or more expected IPs from a CSV file.
+    This version is robust to unquoted multiple commas in the expected_ip column.
+    """
+    fqdns = []
+    with open(filename, newline="") as csvfile:
+        reader = csv.reader(csvfile)
+        headers = next(reader, None)  # skip header
+        for row in reader:
+            if not row or not row[0].strip():
+                continue
+            fqdn = row[0].strip()
+            # Join remaining columns in case multiple expected IPs aren't quoted
+            expected_raw = ",".join(row[1:]).strip()
+            expected_ips = [ip.strip() for ip in expected_raw.split(",") if ip.strip()]
+            fqdns.append({"fqdn": fqdn, "expected_ips": expected_ips})
+    return fqdns
+
+
 def main():
-    # Domains and DNS servers to test
-    fqdns = ["google.com", "openai.com", "github.com", "nonexistent.domain"]
+    csv_filename = "fqdns.csv"  # CSV file containing fqdn,expected_ip
     dns_servers = ["8.8.8.8", "1.1.1.1"]
     max_workers = 10
 
-    # Results structure: {dns_server: [ {fqdn, ips}, ... ]}
+    fqdns_data = read_fqdns_from_csv(csv_filename)
     results = {dns: [] for dns in dns_servers}
-
+    
+    # Perform concurrent DNS lookups
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(dns_lookup, fqdn, dns)
-            for fqdn in fqdns
+            executor.submit(dns_lookup, row["fqdn"], dns)
+            for row in fqdns_data
             for dns in dns_servers
         ]
 
         for future in as_completed(futures):
             dns_server, entry = future.result()
             results[dns_server].append(entry)
-
-    # Pretty output
+    pprint(results)
+    # Compare results
+    critical_issues = []
     for dns_server, lookups in results.items():
-        print(f"\n=== Results from DNS server {dns_server} ===")
         for record in lookups:
-            if record["ips"]:
-                print(f"{record['fqdn']}: {', '.join(record['ips'])}")
-            else:
-                print(f"{record['fqdn']}: No result")
+            fqdn = record["fqdn"]
+            returned_ips = record["ips"]
 
-    return results
+            # Get expected IPs for this fqdn
+            expected_ips = next(
+                (item["expected_ips"] for item in fqdns_data if item["fqdn"] == fqdn),
+                []
+            )
+
+            # Mark critical if no IPs returned at all
+            if not returned_ips:
+                critical_issues.append(
+                    f"{dns_server} returned no IP address for {fqdn}"
+                )
+                continue
+
+            # Mark critical if none of the expected IPs appear in results
+            if expected_ips and not any(ip in returned_ips for ip in expected_ips):
+                critical_issues.append(
+                    f"{dns_server} returned {', '.join(returned_ips)} for {fqdn} "
+                    f"(expected one of {', '.join(expected_ips)})"
+                )
+
+    # --- Checkmk-compatible output ---
+    if critical_issues:
+        print("CRITICAL: Unexpected or missing addresses returned")
+        for issue in critical_issues:
+            print(f"- {issue}")
+        sys.exit(2)
+    else:
+        print("OK: All DNS lookups returned expected results")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
