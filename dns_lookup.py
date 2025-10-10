@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import csv
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
-from pprint import pprint
+import argparse
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 def extract_ips_from_nslookup(output):
     """
@@ -71,13 +73,30 @@ def read_fqdns_from_csv(filename):
 
 
 def main():
-    csv_filename = "fqdns.csv"  # CSV file containing fqdn,expected_ip
+    # --- Parse command-line arguments ---
+    parser = argparse.ArgumentParser(description="Checkmk DNS lookup plugin")
+    parser.add_argument(
+        "-f", "--file",
+        dest="csv_filename",
+        default="fqdns.csv",
+        help="Path to the FQDN CSV file (default: fqdns.csv)"
+    )
+    args = parser.parse_args()
+
+    csv_filename = args.csv_filename
+
+    # If the CSV file is missing, exit UNKNOWN (code 3)
+    if not os.path.isfile(csv_filename):
+        print(f"UNKNOWN: CSV file not found at '{csv_filename}' — DNS checks skipped")
+        sys.exit(3)
+
+    # DNS servers to query
     dns_servers = ["8.8.8.8", "1.1.1.1"]
     max_workers = 10
 
     fqdns_data = read_fqdns_from_csv(csv_filename)
     results = {dns: [] for dns in dns_servers}
-    
+
     # Perform concurrent DNS lookups
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
@@ -89,7 +108,7 @@ def main():
         for future in as_completed(futures):
             dns_server, entry = future.result()
             results[dns_server].append(entry)
-    pprint(results)
+
     # Compare results
     critical_issues = []
     for dns_server, lookups in results.items():
