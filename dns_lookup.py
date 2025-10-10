@@ -5,7 +5,7 @@ import sys
 import argparse
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from pprint import pprint
 
 def extract_ips_from_nslookup(output):
     """Extract all resolved IP addresses from nslookup output."""
@@ -62,10 +62,7 @@ def read_fqdns_from_csv(filename):
 
 
 def read_dns_servers_from_csv(filename, include_groups):
-    """
-    Read DNS servers from a CSV file.
-    Only include servers whose identifier is in the include_groups list.
-    """
+    """Read DNS servers from a CSV file, filtering by identifier."""
     dns_servers = []
     with open(filename, newline="") as csvfile:
         reader = csv.DictReader(csvfile)
@@ -77,6 +74,19 @@ def read_dns_servers_from_csv(filename, include_groups):
             if group in include_groups:
                 dns_servers.append(server)
     return dns_servers
+
+
+def build_allowed_ip_list(fqdns_data):
+    """
+    Build a flat list of all expected IPs from the CSV (excluding wildcards).
+    This list is used for wildcard (*) validation across all FQDNs.
+    """
+    allowed_ips = []
+    for entry in fqdns_data:
+        for ip in entry["expected_ips"]:
+            if ip != "*" and ip not in allowed_ips:
+                allowed_ips.append(ip)
+    return allowed_ips
 
 
 def main():
@@ -106,40 +116,37 @@ def main():
     dns_filename = args.dns_filename
     dns_groups = [g.strip().lower() for g in args.dns_groups.split(",") if g.strip()]
 
-    # Handle missing FQDN CSV
+    # Handle missing files
     if not os.path.isfile(csv_filename):
         print(f"UNKNOWN: CSV file not found at '{csv_filename}' — DNS checks skipped")
         sys.exit(3)
-
-    # Handle missing DNS server CSV
     if not os.path.isfile(dns_filename):
         print(f"UNKNOWN: DNS server file not found at '{dns_filename}' — DNS checks skipped")
         sys.exit(3)
 
-    # Load DNS servers
+    # Load data
     dns_servers = read_dns_servers_from_csv(dns_filename, dns_groups)
     if not dns_servers:
         print(f"UNKNOWN: No DNS servers found for group(s): {', '.join(dns_groups)}")
         sys.exit(3)
 
-    # Load FQDN list
     fqdns_data = read_fqdns_from_csv(csv_filename)
+    allowed_ips = build_allowed_ip_list(fqdns_data)
 
     max_workers = 10
     results = {dns: [] for dns in dns_servers}
 
-    # Perform concurrent DNS lookups
+    # Perform concurrent lookups
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(dns_lookup, row["fqdn"], dns)
             for row in fqdns_data
             for dns in dns_servers
         ]
-
         for future in as_completed(futures):
             dns_server, entry = future.result()
             results[dns_server].append(entry)
-
+    pprint(results)
     # Compare results
     critical_issues = []
     for dns_server, lookups in results.items():
@@ -153,11 +160,22 @@ def main():
             )
 
             if not returned_ips:
-                critical_issues.append(
-                    f"{dns_server} returned no IP address for {fqdn}"
-                )
+                critical_issues.append(f"{dns_server} returned no IP address for {fqdn}")
                 continue
 
+            has_wildcard = "*" in expected_ips
+
+            # --- Wildcard logic ---
+            if has_wildcard:
+                # Only fail if none of the returned IPs are found in the global allowed list
+                if allowed_ips and not any(ip in allowed_ips for ip in returned_ips):
+                    critical_issues.append(
+                        f"{dns_server} returned {', '.join(returned_ips)} for {fqdn} "
+                        f"(no match in allowed IP list despite wildcard)"
+                    )
+                continue
+
+            # Normal expected IP check
             if expected_ips and not any(ip in returned_ips for ip in expected_ips):
                 critical_issues.append(
                     f"{dns_server} returned {', '.join(returned_ips)} for {fqdn} "

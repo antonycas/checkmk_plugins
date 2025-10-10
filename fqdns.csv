@@ -1,4 +1,5 @@
 fqdn,expected_ip
 openai.com,104.18.33.45,172.64.154.211
 github.com,20.26.156.215
+github.com,*
 nonexistent.domain,1.2.3.4,2.3.4.5
