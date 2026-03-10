@@ -109,12 +109,19 @@ def main():
         default="public",
         help="Comma-separated list of DNS server identifiers to include (default: public)"
     )
+    parser.add_argument(
+        "--ignore-ips",
+        dest="ignore_ips",
+        default="",
+        help="Comma-separated list of IPs to ignore during validation"
+    )
 
     args = parser.parse_args()
 
     csv_filename = args.csv_filename
     dns_filename = args.dns_filename
     dns_groups = [g.strip().lower() for g in args.dns_groups.split(",") if g.strip()]
+    ignore_ips = [ip.strip() for ip in args.ignore_ips.split(",") if ip.strip()]
 
     # Handle missing files
     if not os.path.isfile(csv_filename):
@@ -154,42 +161,58 @@ def main():
             fqdn = record["fqdn"]
             returned_ips = record["ips"]
 
+            # --- Case 1: No IPs at all ---
+            if not returned_ips:
+                critical_issues.append(f"{dns_server} returned no IP address for {fqdn}")
+                continue
+
+            # --- Case 2: Filter ignored IPs ---
+            filtered_ips = [ip for ip in returned_ips if ip not in ignore_ips]
+
+            # If all returned IPs are ignored, skip this record (no alert)
+            if not filtered_ips and returned_ips:
+                continue
+
             expected_ips = next(
                 (item["expected_ips"] for item in fqdns_data if item["fqdn"] == fqdn),
                 []
             )
 
-            if not returned_ips:
-                critical_issues.append(f"{dns_server} returned no IP address for {fqdn}")
-                continue
-
             has_wildcard = "*" in expected_ips
 
             # --- Wildcard logic ---
             if has_wildcard:
-                # Only fail if none of the returned IPs are found in the global allowed list
-                if allowed_ips and not any(ip in allowed_ips for ip in returned_ips):
+                if allowed_ips and not any(ip in allowed_ips for ip in filtered_ips):
                     critical_issues.append(
-                        f"{dns_server} returned {', '.join(returned_ips)} for {fqdn} "
+                        f"{dns_server} returned {', '.join(filtered_ips)} for {fqdn} "
                         f"(no match in allowed IP list despite wildcard)"
                     )
                 continue
 
-            # Normal expected IP check
-            if expected_ips and not any(ip in returned_ips for ip in expected_ips):
+            # --- Strict match: all and only expected IPs ---
+            if expected_ips and set(filtered_ips) != set(expected_ips):
+                missing = set(expected_ips) - set(filtered_ips)
+                extra = set(filtered_ips) - set(expected_ips)
+                msg_parts = []
+                if missing:
+                    msg_parts.append(f"missing {', '.join(sorted(missing))}")
+                if extra:
+                    msg_parts.append(f"unexpected {', '.join(sorted(extra))}")
+                detail = "; ".join(msg_parts) if msg_parts else "mismatch"
                 critical_issues.append(
-                    f"{dns_server} returned {', '.join(returned_ips)} for {fqdn} "
-                    f"(expected one of {', '.join(expected_ips)})"
+                    f"{dns_server} returned {', '.join(filtered_ips)} for {fqdn} ({detail})"
                 )
 
     # --- Checkmk-compatible output ---
+    ignore_note = f" Ignoring IPs: {', '.join(ignore_ips)}." if ignore_ips else ""
+
     if critical_issues:
-        print("CRITICAL: Unexpected or missing addresses returned, see detailed output for more information.")
+        print(f"CRITICAL: Unexpected or missing addresses returned, see detailed output for more information.{ignore_note}")
         for issue in critical_issues:
             print(f"- {issue}")
         sys.exit(2)
     else:
-        print("OK: All DNS lookups returned expected results")
+        print(f"OK: All DNS lookups returned expected results.{ignore_note}")
         sys.exit(0)
 
 
