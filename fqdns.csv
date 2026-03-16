@@ -1,4 +1,10 @@
 fqdn,expected_ip
-openai.com,104.18.33.45,172.64.154.211
-github.com,20.26.156.215
-github.com,*
+ftp.epexspot.com,195.254.158.152
+eu-ie-1.meteologica.com,34.248.13.118
+eu-gb-1.meteologica.com,140.238.120.19
+ftp.nena.no,185.120.25.48
+ftpclient1.speedwellweather.com,94.126.42.184
+sftp.teslaforecast.co.uk,20.0.202.198
+sftp-transparency.entsoe.eu,62.233.0.9
+ftp.industrialinfo.com,65.89.208.13
+pointconnect.commodities.refinitiv.com,155.46.24.49

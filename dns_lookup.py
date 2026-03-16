@@ -7,43 +7,40 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pprint import pprint
 
-def extract_ips_from_nslookup(output):
-    """Extract all resolved IP addresses from nslookup output."""
-    lines = output.splitlines()
-    result_ips = []
-    in_answer_section = False
-
-    for line in lines:
+def extract_ips_from_dig(output):
+    """Extract IP addresses from dig +short output."""
+    ips = []
+    for line in output.splitlines():
         line = line.strip()
-
-        if line.startswith("Name:"):
-            in_answer_section = True
-            continue
-
-        if in_answer_section and line.startswith("Address:"):
-            ip = line.split("Address:")[-1].strip()
-            if ip:
-                result_ips.append(ip)
-
-    return result_ips
-
+        if line:
+            ips.append(line)
+    return ips
 
 def dns_lookup(fqdn, dns_server):
-    """Perform a DNS lookup using nslookup and extract all returned IPs."""
+    """Perform a DNS lookup using dig and extract all returned IPs."""
     try:
         result = subprocess.run(
-            ["nslookup", fqdn, dns_server],
+            ["dig", f"@{dns_server}", fqdn, "A", "+short"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
             timeout=5
         )
-        output = result.stdout.strip() or result.stderr.strip()
-        ips = extract_ips_from_nslookup(output)
+
+        if result.returncode != 0:
+            return dns_server, {
+                "fqdn": fqdn,
+                "ips": [],
+                "error": result.stderr.strip() or f"dig exited with code {result.returncode}"
+            }
+
+        output = result.stdout.strip()
+        ips = extract_ips_from_dig(output)
+
         return dns_server, {"fqdn": fqdn, "ips": ips}
+
     except Exception as e:
         return dns_server, {"fqdn": fqdn, "ips": [], "error": str(e)}
-
 
 def read_fqdns_from_csv(filename):
     """Read FQDNs and one or more expected IPs from a CSV file."""
@@ -153,7 +150,7 @@ def main():
         for future in as_completed(futures):
             dns_server, entry = future.result()
             results[dns_server].append(entry)
-    pprint(results)
+
     # Compare results
     critical_issues = []
     for dns_server, lookups in results.items():
@@ -163,7 +160,12 @@ def main():
 
             # --- Case 1: No IPs at all ---
             if not returned_ips:
-                critical_issues.append(f"{dns_server} returned no IP address for {fqdn}")
+                if "error" in record:
+                    critical_issues.append(
+                        f"{dns_server} failed lookup for {fqdn}: {record['error']}"
+                    )
+                else:
+                    critical_issues.append(f"{dns_server} returned no IP address for {fqdn}")
                 continue
 
             # --- Case 2: Filter ignored IPs ---
@@ -218,4 +220,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
